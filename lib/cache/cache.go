@@ -286,7 +286,10 @@ func New(config Config) (*Cache, error) {
 	}
 	cs.collections = collections
 
-	err = cs.fetch(ctx)
+	apply, err := cs.fetch(ctx)
+	if err == nil {
+		err = apply()
+	}
 	if err != nil {
 		// "only recent" behavior does not tolerate
 		// stale data, so it has to initialize itself
@@ -465,8 +468,11 @@ func (c *Cache) fetchAndWatch(ctx context.Context, retry utils.Retry) error {
 			return trace.BadParameter("expected init event, got %v instead", event.Type)
 		}
 	}
-	err = c.fetch(ctx)
+	apply, err := c.fetch(ctx)
 	if err != nil {
+		return trace.Wrap(err)
+	}
+	if err := apply(); err != nil {
 		return trace.Wrap(err)
 	}
 	retry.Reset()
@@ -512,13 +518,23 @@ func (c *Cache) Close() error {
 	return nil
 }
 
-func (c *Cache) fetch(ctx context.Context) error {
+func (c *Cache) fetch(ctx context.Context) (apply func() error, err error) {
+	applyfns := make([]func() error, 0, len(c.collections))
 	for _, collection := range c.collections {
-		if err := collection.fetch(ctx); err != nil {
-			return trace.Wrap(err)
+		applyfn, err := collection.fetch(ctx)
+		if err != nil {
+			return nil, trace.Wrap(err)
 		}
+		applyfns = append(applyfns, applyfn)
 	}
-	return nil
+	return func() error {
+		for _, applyfn := range applyfns {
+			if err := applyfn(); err != nil {
+				return trace.Wrap(err)
+			}
+		}
+		return nil
+	}, nil
 }
 
 func (c *Cache) processEvent(ctx context.Context, event services.Event) error {
