@@ -111,6 +111,16 @@ type Cache struct {
 	// ok indicates whether the cache is in a valid state for reads.
 	ok bool
 
+	// initOnce protects initC and initErr.
+	initOnce sync.Once
+	// initC is closed on the first attempt to initialize the
+	// cache, whether or not it is successful.  Once initC
+	// has returned, initErr is safe to read.
+	initC chan struct{}
+	// initErr is set if the first attempt to initialize the cache
+	// fails.
+	initErr error
+
 	// wrapper is a wrapper around cache backend that
 	// allows to set backend into failure mode,
 	// intercepting all calls and returning errors instead
@@ -134,6 +144,13 @@ type Cache struct {
 
 	// closedFlag is set to indicate that the services are closed
 	closedFlag int32
+}
+
+func (c *Cache) setInit(err error) {
+	c.initOnce.Do(func() {
+		c.initErr = err
+		close(c.initC)
+	})
 }
 
 type readGuard struct {
@@ -323,6 +340,7 @@ func New(config Config) (*Cache, error) {
 		ctx:                ctx,
 		cancel:             cancel,
 		Config:             config,
+		initC:              make(chan struct{}),
 		trustCache:         local.NewCAService(wrapper),
 		clusterConfigCache: local.NewClusterConfigurationService(wrapper),
 		provisionerCache:   local.NewProvisioningService(wrapper),
@@ -341,22 +359,23 @@ func New(config Config) (*Cache, error) {
 	}
 	cs.collections = collections
 
-	apply, err := cs.fetch(ctx)
-	if err == nil {
-		err = apply()
-		if err != nil {
-			cs.ok = true
-		}
-	}
-	if err != nil {
-		// "only recent" behavior does not tolerate
-		// stale data, so it has to initialize itself
-		// with recent data on startup or fail
-		if cs.OnlyRecent.Enabled {
-			return nil, trace.Wrap(err)
-		}
-	}
 	go cs.update(ctx)
+
+	select {
+	case <-cs.initC:
+		if cs.initErr != nil && cs.OnlyRecent.Enabled {
+			cs.Close()
+			return nil, trace.Wrap(cs.initErr)
+		}
+	case <-ctx.Done():
+		cs.Close()
+		return nil, trace.Wrap(ctx.Err(), "context closed during cache init")
+	case <-time.After(time.Second * 30):
+		if cs.OnlyRecent.Enabled {
+			cs.Close()
+			return nil, trace.Errorf("timeout waiting for cache init")
+		}
+	}
 	return cs, nil
 }
 
@@ -388,17 +407,15 @@ func (c *Cache) update(ctx context.Context) {
 	}
 	for {
 		err := c.fetchAndWatch(ctx, retry)
-		if err != nil {
-			c.setCacheState(err)
-			if !c.isClosed() {
-				c.Warningf("Re-init the cache on error: %v.", trace.Unwrap(err))
+		c.setInit(err)
+		if err != nil && !c.isClosed() {
+			c.Warningf("Re-init the cache on error: %v.", trace.Unwrap(err))
+			if c.OnlyRecent.Enabled {
+				c.rw.Lock()
+				c.ok = false
+				c.rw.Unlock()
 			}
 		}
-		// if cache is reloading,
-		// all watchers will be out of sync, because
-		// cache will reload its own watcher to the backend,
-		// so signal closure to reset the watchers
-		c.eventsFanout.CloseWatchers()
 		// events cache should be closed as well
 		c.Debugf("Reloading %v.", retry)
 		select {
@@ -409,21 +426,6 @@ func (c *Cache) update(ctx context.Context) {
 			return
 		}
 	}
-}
-
-// setCacheState for "only recent" cache behavior will erase
-// the cache and set error mode to refuse to serve stale data,
-// otherwise does nothing
-func (c *Cache) setCacheState(err error) {
-	if !c.OnlyRecent.Enabled {
-		return
-	}
-	if err := c.eraseAll(); err != nil {
-		if !c.isClosed() {
-			c.Warningf("Failed to erase the data: %v.", err)
-		}
-	}
-	c.wrapper.SetReadError(trace.ConnectionProblem(err, "cache is unavailable"))
 }
 
 // setTTL overrides TTL supplied by the resource
@@ -530,11 +532,19 @@ func (c *Cache) fetchAndWatch(ctx context.Context, retry utils.Retry) error {
 	if err != nil {
 		return trace.Wrap(err)
 	}
-	if err := apply(); err != nil {
+	c.rw.Lock()
+	err = apply()
+	c.ok = err == nil
+	c.rw.Unlock()
+	if err != nil {
 		return trace.Wrap(err)
 	}
+	c.setInit(nil)
+	// watchers have been queuing up since the last time
+	// the cache was in a healthy state; broadcast OpInit.
+	c.eventsFanout.SetInit()
+	defer c.eventsFanout.Reset()
 	retry.Reset()
-	c.wrapper.SetReadError(nil)
 	c.notify(CacheEvent{Type: WatcherStarted})
 	for {
 		select {

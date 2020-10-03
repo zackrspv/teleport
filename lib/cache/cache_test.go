@@ -419,9 +419,9 @@ func (s *CacheSuite) preferRecent(c *check.C) {
 	}))
 	c.Assert(err, check.IsNil)
 
-	cas, err := p.cache.GetCertAuthorities(services.UserCA, false)
-	c.Assert(err, check.IsNil)
-	c.Assert(cas, check.HasLen, 0)
+	_, err = p.cache.GetCertAuthorities(services.UserCA, false)
+	c.Assert(err, check.NotNil) // Cache could not init, so must return an error
+	//c.Assert(cas, check.HasLen, 0)
 
 	ca := suite.NewTestCA(services.UserCA, "example.com")
 	// NOTE 1: this could produce event processed

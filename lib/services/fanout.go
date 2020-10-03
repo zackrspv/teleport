@@ -36,10 +36,13 @@ type fanoutEntry struct {
 // watchers.  Used by the cache layer to forward events.
 type Fanout struct {
 	mu       sync.Mutex
+	init     bool
 	watchers map[string][]fanoutEntry
 }
 
-// NewFanout creates a new Fanout instance.
+// NewFanout creates a new Fanout instance in an uninitialized
+// state.  Until initialized, watchers will be queued but no
+// events will be sent.
 func NewFanout() *Fanout {
 	return &Fanout{
 		watchers: make(map[string][]fanoutEntry),
@@ -54,12 +57,40 @@ func (f *Fanout) NewWatcher(ctx context.Context, watch Watch) (Watcher, error) {
 	if err != nil {
 		return nil, trace.Wrap(err)
 	}
-	if err := w.emit(Event{Type: backend.OpInit}); err != nil {
-		w.cancel()
-		return nil, trace.Wrap(err)
+	if f.init {
+		// fanout is already initialized; emit OpInit immediately.
+		if err := w.emit(Event{Type: backend.OpInit}); err != nil {
+			w.cancel()
+			return nil, trace.Wrap(err)
+		}
 	}
 	f.addWatcher(w)
 	return w, nil
+}
+
+// SetInit sets Fanout into an initialized state, sending OpInit events
+// to any watchers which were added prior to initialization.
+func (f *Fanout) SetInit() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.init {
+		return
+	}
+	var remove []*fanoutWatcher
+	for _, entries := range f.watchers {
+	Inner:
+		for _, entry := range entries {
+			if err := entry.watcher.emit(Event{Type: backend.OpInit}); err != nil {
+				remove = append(remove, entry.watcher)
+				continue Inner
+			}
+		}
+	}
+	for _, w := range remove {
+		f.removeWatcher(w)
+		w.cancel()
+	}
+	f.init = true
 }
 
 func filterEventSecrets(event Event) Event {
@@ -110,9 +141,9 @@ func (f *Fanout) Emit(events ...Event) {
 	}
 }
 
-// CloseWatchers closes all attached watchers, effectively
-// resetting the Fanout instance.
-func (f *Fanout) CloseWatchers() {
+// Reset closes all attached watchers and places the
+// fanout back into an uninitialized state.
+func (f *Fanout) Reset() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, entries := range f.watchers {
@@ -123,6 +154,7 @@ func (f *Fanout) CloseWatchers() {
 	// watcher map was potentially quite large, so
 	// relenguish that memory.
 	f.watchers = make(map[string][]fanoutEntry)
+	f.init = false
 }
 
 func (f *Fanout) addWatcher(w *fanoutWatcher) {
