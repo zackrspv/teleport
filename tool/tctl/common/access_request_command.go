@@ -42,6 +42,8 @@ type AccessRequestCommand struct {
 	user      string
 	roles     string
 	delegator string
+	reason    string
+	attrs     string
 	// format is the output format, e.g. text or json
 	format string
 
@@ -63,10 +65,14 @@ func (c *AccessRequestCommand) Initialize(app *kingpin.Application, config *serv
 	c.requestApprove = requests.Command("approve", "Approve pending access request")
 	c.requestApprove.Arg("request-id", "ID of target request(s)").Required().StringVar(&c.reqIDs)
 	c.requestApprove.Flag("delegator", "Optional delegating identity").StringVar(&c.delegator)
+	c.requestApprove.Flag("reason", "Optional reason message").StringVar(&c.reason)
+	c.requestApprove.Flag("attrs", "Resolution attributes <key>=<val>[,...]").StringVar(&c.attrs)
 
 	c.requestDeny = requests.Command("deny", "Deny pending access request")
 	c.requestDeny.Arg("request-id", "ID of target request(s)").Required().StringVar(&c.reqIDs)
 	c.requestDeny.Flag("delegator", "Optional delegating identity").StringVar(&c.delegator)
+	c.requestDeny.Flag("reason", "Optional reason message").StringVar(&c.reason)
+	c.requestDeny.Flag("attrs", "Resolution attributes <key>=<val>[,...]").StringVar(&c.attrs)
 
 	c.requestCreate = requests.Command("create", "Create pending access request")
 	c.requestCreate.Arg("username", "Name of target user").Required().StringVar(&c.user)
@@ -106,13 +112,44 @@ func (c *AccessRequestCommand) List(client auth.ClientI) error {
 	return nil
 }
 
+func (c *AccessRequestCommand) splitAttrs() (map[string]string, error) {
+	attrs := make(map[string]string)
+	for _, s := range strings.Split(c.attrs, ",") {
+		if s == "" {
+			continue
+		}
+		idx := strings.Index(s, "=")
+		if idx < 1 {
+			return nil, trace.BadParameter("invalid key-value pair: %q", s)
+		}
+		key, val := strings.TrimSpace(s[:idx]), strings.TrimSpace(s[idx+1:])
+		if key == "" {
+			return nil, trace.BadParameter("empty attr key")
+		}
+		if val == "" {
+			return nil, trace.BadParameter("empty sttr val")
+		}
+		attrs[key] = val
+	}
+	return attrs, nil
+}
+
 func (c *AccessRequestCommand) Approve(client auth.ClientI) error {
 	ctx := context.TODO()
 	if c.delegator != "" {
 		ctx = auth.WithDelegator(ctx, c.delegator)
 	}
+	attrs, err := c.splitAttrs()
+	if err != nil {
+		return trace.Wrap(err)
+	}
 	for _, reqID := range strings.Split(c.reqIDs, ",") {
-		if err := client.SetAccessRequestState(ctx, reqID, services.RequestState_APPROVED); err != nil {
+		if err := client.SetAccessRequestState(ctx, services.AccessRequestUpdate{
+			RequestID: reqID,
+			State:     services.RequestState_APPROVED,
+			Reason:    c.reason,
+			Attrs:     attrs,
+		}); err != nil {
 			return trace.Wrap(err)
 		}
 	}
@@ -124,8 +161,17 @@ func (c *AccessRequestCommand) Deny(client auth.ClientI) error {
 	if c.delegator != "" {
 		ctx = auth.WithDelegator(ctx, c.delegator)
 	}
+	attrs, err := c.splitAttrs()
+	if err != nil {
+		return trace.Wrap(err)
+	}
 	for _, reqID := range strings.Split(c.reqIDs, ",") {
-		if err := client.SetAccessRequestState(ctx, reqID, services.RequestState_DENIED); err != nil {
+		if err := client.SetAccessRequestState(ctx, services.AccessRequestUpdate{
+			RequestID: reqID,
+			State:     services.RequestState_DENIED,
+			Reason:    c.reason,
+			Attrs:     attrs,
+		}); err != nil {
 			return trace.Wrap(err)
 		}
 	}

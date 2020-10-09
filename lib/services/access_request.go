@@ -140,12 +140,29 @@ func (f *AccessRequestFilter) Equals(o AccessRequestFilter) bool {
 	return f.ID == o.ID && f.User == o.User && f.State == o.State
 }
 
+type AccessRequestUpdate struct {
+	RequestID string
+	State     RequestState
+	Reason    string
+	Attrs     map[string]string
+}
+
+func (u *AccessRequestUpdate) Check() error {
+	if u.RequestID == "" {
+		return trace.BadParameter("missing request id")
+	}
+	if u.State.IsNone() {
+		return trace.BadParameter("missing request state")
+	}
+	return nil
+}
+
 // DynamicAccess is a service which manages dynamic RBAC.
 type DynamicAccess interface {
 	// CreateAccessRequest stores a new access request.
 	CreateAccessRequest(ctx context.Context, req AccessRequest) error
 	// SetAccessRequestState updates the state of an existing access request.
-	SetAccessRequestState(ctx context.Context, reqID string, state RequestState) error
+	SetAccessRequestState(ctx context.Context, params AccessRequestUpdate) error
 	// GetAccessRequests gets all currently active access requests.
 	GetAccessRequests(ctx context.Context, filter AccessRequestFilter) ([]AccessRequest, error)
 	// DeleteAccessRequest deletes an access request.
@@ -188,6 +205,14 @@ type AccessRequest interface {
 	// SetAccessExpiry sets the upper limit for which this request
 	// may be considered active.
 	SetAccessExpiry(time.Time)
+
+	GetRequestReason() string
+	SetRequestReason(string)
+	GetResolveReason() string
+	SetResolveReason(string)
+	GetResolveAttrs() map[string]string
+	SetResolveAttrs(map[string]string)
+
 	// CheckAndSetDefaults validates the access request and
 	// supplies default values where appropriate.
 	CheckAndSetDefaults() error
@@ -334,6 +359,30 @@ func (r *AccessRequestV3) SetAccessExpiry(expiry time.Time) {
 	r.Spec.Expires = expiry
 }
 
+func (r *AccessRequestV3) GetRequestReason() string {
+	return r.Spec.RequestReason
+}
+
+func (r *AccessRequestV3) SetRequestReason(reason string) {
+	r.Spec.RequestReason = reason
+}
+
+func (r *AccessRequestV3) GetResolveReason() string {
+	return r.Spec.ResolveReason
+}
+
+func (r *AccessRequestV3) SetResolveReason(reason string) {
+	r.Spec.ResolveReason = reason
+}
+
+func (r *AccessRequestV3) GetResolveAttrs() map[string]string {
+	return r.Spec.ResolveAttrs
+}
+
+func (r *AccessRequestV3) SetResolveAttrs(attrs map[string]string) {
+	r.Spec.ResolveAttrs = attrs
+}
+
 func (r *AccessRequestV3) CheckAndSetDefaults() error {
 	if err := r.Metadata.CheckAndSetDefaults(); err != nil {
 		return trace.Wrap(err)
@@ -476,7 +525,10 @@ const AccessRequestSpecSchema = `{
 		},
 		"state": { "type": "integer" },
 		"created": { "type": "string" },
-		"expires": { "type": "string" }
+		"expires": { "type": "string" },
+		"request_reason": { "type": "string" },
+		"resolve_reason": { "type": "string" },
+		"resolve_attrs": { "type": "object" }
 	}
 }`
 

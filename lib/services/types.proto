@@ -560,6 +560,16 @@ message AccessRequestSpecV3 {
         (gogoproto.nullable) = false,
         (gogoproto.jsontag) = "expires,omitempty"
     ];
+
+    // RequestReason is an optional message explaining the reason for the request.
+    string RequestReason = 6 [ (gogoproto.jsontag) = "request_reason,omitempty" ];
+
+    // ResolveReason is an optional message explaining the reason for the resolution
+    // of the request (approval, denail, etc...).
+    string ResolveReason = 7 [ (gogoproto.jsontag) = "resolve_reason,omitempty" ];
+
+    // ResolveAttrs are arbitrary attributes applied at the time of resolution.
+    map<string, string> ResolveAttrs = 8 [ (gogoproto.jsontag) = "resolve_attrs,omitempty" ];
 }
 
 // AccessRequestFilter encodes filter params for access requests.

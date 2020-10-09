@@ -160,6 +160,10 @@ message RequestStateSetter {
     // state update (used by plugins to indicate which user approved
     // or denied the request).
     string Delegator = 3 [ (gogoproto.jsontag) = "delegator,omitempty" ];
+    // Reason is an optional message indicating the reason for the
+    // resolution (approval, denail , etc...).
+    string Reason = 4 [ (gogoproto.jsontag) = "reason,omitempty" ];
+    map<string, string> Attrs = 5 [ (gogoproto.jsontag) = "attrs,omitempty" ];
 }
 
 // RequestID is the unique identifier of an access request.

@@ -1505,8 +1505,8 @@ func (a *AuthServer) CreateAccessRequest(ctx context.Context, req services.Acces
 	return trace.Wrap(err)
 }
 
-func (a *AuthServer) SetAccessRequestState(ctx context.Context, reqID string, state services.RequestState) error {
-	if err := a.DynamicAccess.SetAccessRequestState(ctx, reqID, state); err != nil {
+func (a *AuthServer) SetAccessRequestState(ctx context.Context, params services.AccessRequestUpdate) error {
+	if err := a.DynamicAccess.SetAccessRequestState(ctx, params); err != nil {
 		return trace.Wrap(err)
 	}
 	event := &events.AccessRequestCreate{
@@ -1517,8 +1517,9 @@ func (a *AuthServer) SetAccessRequestState(ctx context.Context, reqID string, st
 		ResourceMetadata: events.ResourceMetadata{
 			UpdatedBy: clientUsername(ctx),
 		},
-		RequestID:    reqID,
-		RequestState: state.String(),
+		RequestID:    params.RequestID,
+		RequestState: params.State.String(),
+		// TODO(fspmarshall): Log reason and attributes
 	}
 	if delegator := getDelegator(ctx); delegator != "" {
 		event.Delegator = delegator

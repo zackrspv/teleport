@@ -2793,14 +2793,16 @@ func (c *Client) DeleteAccessRequest(ctx context.Context, reqID string) error {
 	return nil
 }
 
-func (c *Client) SetAccessRequestState(ctx context.Context, reqID string, state services.RequestState) error {
+func (c *Client) SetAccessRequestState(ctx context.Context, params services.AccessRequestUpdate) error {
 	clt, err := c.grpc()
 	if err != nil {
 		return trace.Wrap(err)
 	}
 	setter := proto.RequestStateSetter{
-		ID:    reqID,
-		State: state,
+		ID:     params.RequestID,
+		State:  params.State,
+		Reason: params.Reason,
+		Attrs:  params.Attrs,
 	}
 	if d := getDelegator(ctx); d != "" {
 		setter.Delegator = d
