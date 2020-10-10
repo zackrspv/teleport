@@ -35,9 +35,9 @@ type fanoutEntry struct {
 // Fanout is a helper which allows a stream of events to be fanned-out to many
 // watchers.  Used by the cache layer to forward events.
 type Fanout struct {
-	mu       sync.Mutex
-	init     bool
-	watchers map[string][]fanoutEntry
+	mu           sync.Mutex
+	init, closed bool
+	watchers     map[string][]fanoutEntry
 }
 
 // NewFanout creates a new Fanout instance in an uninitialized
@@ -53,6 +53,10 @@ func NewFanout() *Fanout {
 func (f *Fanout) NewWatcher(ctx context.Context, watch Watch) (Watcher, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.closed {
+		return nil, trace.Errorf("cannot register watcher, fanout system closed")
+	}
+
 	w, err := newFanoutWatcher(ctx, watch)
 	if err != nil {
 		return nil, trace.Wrap(err)
@@ -76,19 +80,18 @@ func (f *Fanout) SetInit() {
 	if f.init {
 		return
 	}
-	var remove []*fanoutWatcher
 	for _, entries := range f.watchers {
-	Inner:
+		var remove []*fanoutWatcher
 		for _, entry := range entries {
 			if err := entry.watcher.emit(Event{Type: backend.OpInit}); err != nil {
+				entry.watcher.setError(err)
 				remove = append(remove, entry.watcher)
-				continue Inner
 			}
 		}
-	}
-	for _, w := range remove {
-		f.removeWatcher(w)
-		w.cancel()
+		for _, w := range remove {
+			f.removeWatcher(w)
+			w.cancel()
+		}
 	}
 	f.init = true
 }
@@ -107,6 +110,9 @@ func filterEventSecrets(event Event) Event {
 func (f *Fanout) Emit(events ...Event) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if !f.init {
+		panic("Emit called on uninitialized fanout instance")
+	}
 	for _, fullEvent := range events {
 		// by default, we operate on a version of the event which
 		// has had secrets filtered out.
@@ -146,6 +152,18 @@ func (f *Fanout) Emit(events ...Event) {
 func (f *Fanout) Reset() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.closeWatchers()
+	f.init = false
+}
+
+func (f *Fanout) Close() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.closeWatchers()
+	f.closed = true
+}
+
+func (f *Fanout) closeWatchers() {
 	for _, entries := range f.watchers {
 		for _, entry := range entries {
 			entry.watcher.cancel()
@@ -154,7 +172,6 @@ func (f *Fanout) Reset() {
 	// watcher map was potentially quite large, so
 	// relenguish that memory.
 	f.watchers = make(map[string][]fanoutEntry)
-	f.init = false
 }
 
 func (f *Fanout) addWatcher(w *fanoutWatcher) {
@@ -245,5 +262,13 @@ func (w *fanoutWatcher) setError(err error) {
 func (w *fanoutWatcher) Error() error {
 	w.emux.Lock()
 	defer w.emux.Unlock()
-	return w.err
+	if w.err != nil {
+		return w.err
+	}
+	select {
+	case <-w.Done():
+		return trace.Errorf("watcher closed")
+	default:
+		return nil
+	}
 }

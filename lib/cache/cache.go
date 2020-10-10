@@ -36,6 +36,7 @@ import (
 
 // ForAuth sets up watch configuration for the auth server
 func ForAuth(cfg Config) Config {
+	cfg.target = "auth"
 	cfg.Watches = []services.WatchKind{
 		{Kind: services.KindCertAuthority, LoadSecrets: true},
 		{Kind: services.KindClusterName},
@@ -47,6 +48,7 @@ func ForAuth(cfg Config) Config {
 		{Kind: services.KindNamespace},
 		{Kind: services.KindNode},
 		{Kind: services.KindProxy},
+		{Kind: services.KindAuthServer},
 		{Kind: services.KindReverseTunnel},
 		{Kind: services.KindTunnelConnection},
 		{Kind: services.KindAccessRequest},
@@ -57,6 +59,7 @@ func ForAuth(cfg Config) Config {
 
 // ForProxy sets up watch configuration for proxy
 func ForProxy(cfg Config) Config {
+	cfg.target = "proxy"
 	cfg.Watches = []services.WatchKind{
 		{Kind: services.KindCertAuthority, LoadSecrets: false},
 		{Kind: services.KindClusterName},
@@ -76,6 +79,7 @@ func ForProxy(cfg Config) Config {
 
 // ForNode sets up watch configuration for node
 func ForNode(cfg Config) Config {
+	cfg.target = "node"
 	cfg.Watches = []services.WatchKind{
 		{Kind: services.KindCertAuthority, LoadSecrets: false},
 		{Kind: services.KindClusterName},
@@ -201,6 +205,7 @@ func (c *Cache) read() readGuard {
 
 // Config defines cache configuration parameters
 type Config struct {
+	target string
 	// Context is context for parent operations
 	Context context.Context
 	// Watches provides a list of resources
@@ -385,6 +390,15 @@ func New(config Config) (*Cache, error) {
 // to handle subscribers connected to the in-memory caches
 // instead of reading from the backend.
 func (c *Cache) NewWatcher(ctx context.Context, watch services.Watch) (services.Watcher, error) {
+Outer:
+	for _, requested := range watch.Kinds {
+		for _, configured := range c.Config.Watches {
+			if requested.Kind == configured.Kind {
+				continue Outer
+			}
+		}
+		return nil, trace.BadParameter("cache %q does not support watching resource %q", c.Config.target, requested.Kind)
+	}
 	return c.eventsFanout.NewWatcher(ctx, watch)
 }
 
@@ -396,7 +410,20 @@ func (c *Cache) setClosed() {
 	atomic.StoreInt32(&c.closedFlag, 1)
 }
 
+func (c *Cache) setReadOK(ok bool) {
+	c.rw.RLock()
+	current := c.ok
+	c.rw.RUnlock()
+	if current == ok {
+		return
+	}
+	c.rw.Lock()
+	c.ok = ok
+	c.rw.Unlock()
+}
+
 func (c *Cache) update(ctx context.Context) {
+	defer c.Close()
 	retry, err := utils.NewLinear(utils.LinearConfig{
 		Step: c.RetryPeriod / 10,
 		Max:  c.RetryPeriod,
@@ -411,9 +438,7 @@ func (c *Cache) update(ctx context.Context) {
 		if err != nil && !c.isClosed() {
 			c.Warningf("Re-init the cache on error: %v.", trace.Unwrap(err))
 			if c.OnlyRecent.Enabled {
-				c.rw.Lock()
-				c.ok = false
-				c.rw.Unlock()
+				c.setReadOK(false)
 			}
 		}
 		// events cache should be closed as well
@@ -532,13 +557,16 @@ func (c *Cache) fetchAndWatch(ctx context.Context, retry utils.Retry) error {
 	if err != nil {
 		return trace.Wrap(err)
 	}
-	c.rw.Lock()
+
+	// apply will mutate cache, and possibly leave it in an invalid state
+	// if an error occurs, so ensure that cache is not read.
+	c.setReadOK(false)
 	err = apply()
-	c.ok = err == nil
-	c.rw.Unlock()
 	if err != nil {
 		return trace.Wrap(err)
 	}
+
+	c.setReadOK(true)
 	c.setInit(nil)
 	// watchers have been queuing up since the last time
 	// the cache was in a healthy state; broadcast OpInit.
@@ -582,6 +610,7 @@ func (c *Cache) watchKinds() []services.WatchKind {
 // Close closes all outstanding and active cache operations
 func (c *Cache) Close() error {
 	c.cancel()
+	c.eventsFanout.Close()
 	c.setClosed()
 	return nil
 }
